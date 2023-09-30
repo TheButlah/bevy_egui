@@ -1,5 +1,6 @@
 use crate::{
-    EguiContext, EguiContextQuery, EguiInput, EguiMousePosition, EguiSettings, WindowSize,
+    EguiContext, EguiContextQuery, EguiInput, EguiMousePosition, EguiRenderToTexture, EguiSettings,
+    WindowSize,
 };
 #[cfg(feature = "open_url")]
 use bevy::log;
@@ -14,10 +15,10 @@ use bevy::{
         touch::TouchInput,
         ButtonState, Input,
     },
-    prelude::{Entity, EventReader, Query, Resource, Time},
+    prelude::{Assets, Entity, EventReader, Image, Or, Query, Resource, Time, With},
     window::{
-        CursorEntered, CursorLeft, CursorMoved, ReceivedCharacter, RequestRedraw, WindowCreated,
-        WindowFocused,
+        CursorEntered, CursorLeft, CursorMoved, ReceivedCharacter, RequestRedraw, Window,
+        WindowCreated, WindowFocused,
     },
 };
 use std::marker::PhantomData;
@@ -72,7 +73,7 @@ pub struct InputResources<'w, 's> {
 pub struct ContextSystemParams<'w, 's> {
     pub focused_window: Local<'s, Option<Entity>>,
     pub pointer_touch_id: Local<'s, TouchId>,
-    pub contexts: Query<'w, 's, EguiContextQuery>,
+    pub contexts: Query<'w, 's, EguiContextQuery, Or<(With<Window>, With<EguiRenderToTexture>)>>,
     #[system_param(ignore)]
     _marker: PhantomData<&'s ()>,
 }
@@ -367,16 +368,27 @@ pub fn process_input_system(
 }
 
 /// Initialises Egui contexts (for multiple windows).
-pub fn update_window_contexts_system(
+pub fn update_contexts_system(
     mut context_params: ContextSystemParams,
     egui_settings: Res<EguiSettings>,
+    images: Res<Assets<Image>>,
 ) {
     for mut context in context_params.contexts.iter_mut() {
-        let new_window_size = WindowSize::new(
-            context.window.physical_width() as f32,
-            context.window.physical_height() as f32,
-            context.window.scale_factor() as f32,
-        );
+        let new_window_size = if let Some(window) = context.window {
+            WindowSize::new(
+                window.physical_width() as f32,
+                window.physical_height() as f32,
+                window.scale_factor() as f32,
+            )
+        } else if let Some(EguiRenderToTexture(render_output)) = context.render_to_tex.as_deref() {
+            let render_output = images.get(&render_output).expect(
+                "should have found an `Image` with the handle stored in `EguiRenderToTexture`",
+            );
+            let (width, height) = render_output.size().into();
+            WindowSize::new(width, height, 1.)
+        } else {
+            unreachable!("All entities in `context_params` should have either a `Window` or a `EguiRenderToTexture` component")
+        };
         let width = new_window_size.physical_width
             / new_window_size.scale_factor
             / egui_settings.scale_factor as f32;
@@ -439,8 +451,10 @@ pub fn process_output_system(
         }
 
         let mut set_icon = || {
-            context.window.cursor.icon = egui_to_winit_cursor_icon(platform_output.cursor_icon)
-                .unwrap_or(bevy::window::CursorIcon::Default);
+            if let Some(window) = context.window.as_mut() {
+                window.cursor.icon = egui_to_winit_cursor_icon(platform_output.cursor_icon)
+                    .unwrap_or(bevy::window::CursorIcon::Default);
+            }
         };
 
         #[cfg(windows)]
